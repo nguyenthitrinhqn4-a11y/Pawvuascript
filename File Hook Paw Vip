@@ -1,0 +1,773 @@
+// ==UserScript==
+// @name         Paw Hook Vip 36 (Pink Edition)
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Audio enhancer for Discord Web - Pink UI
+// @author       Paw
+// @match        https://discord.com/*
+// @match        https://*.discord.com/*
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+
+(function () {
+    'use strict';
+    if (window.__LucacHellfire__) return;
+    window.__LucacHellfire__ = true;
+
+    /* ═══════════════════════════════════════
+       PARAMS (Tham số điều khiển)
+    ═══════════════════════════════════════ */
+    const P = {
+        preGain:  1.0,   
+        drive:    0.0,   
+        crush:    0.0,   
+        width:    0.0,   
+        postGain: 1.0,   
+        eqBass:   0.0,
+        eqMid:    0.0,
+        eqTreble: 0.0,
+        musicVol: 0.5 // Âm lượng nhạc chạy nền
+    };
+
+    /* ═══════════════════════════════════════
+       AUDIO WORKLET — PAW VIP 500K HOOK DISCORD ENGINE
+    ═══════════════════════════════════════ */
+    const WORKLET = `
+    class LucacEngine extends AudioWorkletProcessor {
+        static get parameterDescriptors() {
+            return [
+                { name:'preGain',  defaultValue:1,   min:0.001, max:3000 }, 
+                { name:'drive',    defaultValue:0,   min:0,     max:1    },
+                { name:'crush',    defaultValue:0,   min:0,     max:1    },
+                { name:'width',    defaultValue:0,   min:0,     max:2    },
+                { name:'postGain', defaultValue:1,   min:0.001, max:80   },
+                { name:'eqBass',   defaultValue:0,   min:-12,   max:12   },
+                { name:'eqMid',    defaultValue:0,   min:-12,   max:12   },
+                { name:'eqTreble', defaultValue:0,   min:-12,   max:12   }
+            ];
+        }
+        constructor() {
+            super();
+            this._limL=1; this._limR=1;
+            this._sweepPhase = 0;
+            this._signalPhase = 0;
+            
+            this._delayBufferL = new Float32Array(3000); 
+            this._delayBufferR = new Float32Array(3000);
+            this._writePtr = 0;
+            
+            this._lpL0 = 0; this._lpL1 = 0;
+            this._lpR0 = 0; this._lpR1 = 0;
+            this._subPhase = 0;
+
+            this._eqL = { low:0, mid:0, high:0 };
+            this._eqR = { low:0, mid:0, high:0 };
+        }
+        
+        _sat(x, k) {
+            if (k < 0.001) return x;
+            const drive = k * 100;
+            return Math.tanh(x * drive) * (1 + k * 0.5);
+        }
+        
+        _hardclip(x, th) {
+            return x > th ? th : x < -th ? -th : x;
+        }
+        
+        _limit(x, env) {
+            const abs = Math.abs(x);
+            if (abs > 1.0) env = Math.max(env, abs);
+            env *= 0.9998; 
+            if (env < 1) env = 1;
+            return { y: x / env, env };
+        }
+
+        process(inputs, outputs, params) {
+            const inp = inputs[0];
+            const out = outputs[0];
+            if (!inp || inp.length === 0) {
+                for (let c=0;c<out.length;c++)
+                    for (let i=0;i<out[c].length;i++)
+                        out[c][i] = (Math.random()-0.5)*0.000001;
+                return true;
+            }
+            const preGain  = params.preGain[0];
+            const drive    = params.drive[0];
+            const crush    = params.crush[0];
+            const width    = params.width[0];
+            const postGain = params.postGain[0];
+            
+            const gBass   = Math.pow(10, params.eqBass[0] / 20);
+            const gMid    = Math.pow(10, params.eqMid[0] / 20);
+            const gTreble = Math.pow(10, params.eqTreble[0] / 20);
+
+            for (let i=0; i<inp[0].length; i++) {
+                let L = inp[0][i] * preGain;
+                let R = (inp[1] ? inp[1][i] : inp[0][i]) * preGain;
+
+                this._eqL.low  += 0.08 * (L - this._eqL.low);
+                this._eqL.high += 0.12 * (L - this._eqL.high);
+                this._eqL.mid   = L - this._eqL.low - this._eqL.high;
+                L = (this._eqL.low * gBass) + (this._eqL.mid * gMid) + (this._eqL.high * gTreble);
+
+                this._eqR.low  += 0.08 * (R - this._eqR.low);
+                this._eqR.high += 0.12 * (R - this._eqR.high);
+                this._eqR.mid   = R - this._eqR.low - this._eqR.high;
+                R = (this._eqR.low * gBass) + (this._eqR.mid * gMid) + (this._eqR.high * gTreble);
+
+                if (drive < 0.7 && preGain < 200) {
+                    this._lpL0 = this._lpL0 * 0.35 + L * 0.65;
+                    this._lpL1 = this._lpL1 * 0.45 + this._lpL0 * 0.55;
+                    
+                    this._lpR0 = this._lpR0 * 0.35 + R * 0.65;
+                    this._lpR1 = this._lpR1 * 0.45 + this._lpR0 * 0.55;
+
+                    let eboyL = this._lpL1;
+                    let eboyR = this._lpR1;
+
+                    const absL = Math.abs(eboyL);
+                    if (absL > 0.02) {
+                        this._subPhase += 0.12; 
+                        eboyL += Math.sin(this._subPhase) * absL * 0.32;
+                    }
+                    const absR = Math.abs(eboyR);
+                    if (absR > 0.02) {
+                        eboyR += Math.sin(this._subPhase) * absR * 0.32;
+                    }
+
+                    const delaySamples = 1152; 
+                    let readPtr = this._writePtr - delaySamples;
+                    if (readPtr < 0) readPtr += 3000;
+
+                    let delayedL = this._delayBufferL[readPtr];
+                    let delayedR = this._delayBufferR[readPtr];
+
+                    this._delayBufferL[this._writePtr] = eboyL + delayedL * 0.18;
+                    this._delayBufferR[this._writePtr] = eboyR + delayedR * 0.18;
+
+                    this._writePtr = (this._writePtr + 1) % 3000;
+
+                    L = eboyL * 0.75 + delayedL * 0.25;
+                    R = eboyR * 0.75 + delayedR * 0.25;
+
+                    L = Math.tanh(L * 1.2);
+                    R = Math.tanh(R * 1.2);
+                }
+
+                let M = (L + R) * 0.5;
+                if (drive > 0.7) {
+                    this._sweepPhase += 0.04; 
+                    const targetFreq = 3900 + Math.sin(this._sweepPhase) * 600; 
+                    const phaseIncr = (2 * Math.PI * targetFreq) / 48000;
+                    
+                    this._signalPhase += phaseIncr;
+                    M += Math.sin(this._signalPhase) * 0.6 * drive;
+                }
+
+                let finalL = this._sat(drive > 0.7 ? M : L, drive);
+                let finalR = this._sat(drive > 0.7 ? M : R, drive);
+
+                if (crush > 0) {
+                    const th = Math.max(0.001, 1.0 - crush * 0.98);
+                    finalL = this._hardclip(finalL, th) / th;
+                    finalR = this._hardclip(finalR, th) / th;
+                    
+                    finalL = this._sat(finalL, drive * 0.5 + 0.3);
+                    finalR = this._sat(finalR, drive * 0.5 + 0.3);
+                }
+
+                const currentWidth = (drive < 0.5 && preGain === 10) ? 0.65 : width;
+                if (currentWidth > 0) {
+                    const mid  = (finalL + finalR) * 0.5;
+                    const side = (inp[0][i] - (inp[1]?inp[1][i]:inp[0][i])) * 0.5 * (1 + currentWidth * 2);
+                    finalL = mid + side;
+                    finalR = mid - side;
+                }
+
+                finalL *= postGain;
+                finalR *= postGain;
+
+                const rL = this._limit(finalL, this._limL);
+                finalL = rL.y; this._limL = rL.env;
+                const rR = this._limit(finalR, this._limR);
+                finalR = rR.y; this._limR = rR.env;
+
+                if (!isFinite(finalL)) finalL = 0;
+                if (!isFinite(finalR)) finalR = 0;
+
+                out[0][i] = finalL;
+                if (out[1]) out[1][i] = finalR;
+            }
+            return true;
+        }
+    }
+    registerProcessor('lucac-engine', LucacEngine);
+    `;
+
+    /* ═══════════════════════════════════════
+       AUDIOCTX HOOK & VIRTUAL MIXER
+    ═══════════════════════════════════════ */
+    const _NativeCtx = window.AudioContext || window.webkitAudioContext;
+    let _ctx = null;
+    let _analyser = null;        // Phân tích âm lượng live-time
+    let _musicSource = null;    // Nguồn âm thanh file nhạc phát vào mic
+    let _musicGainNode = null;  // Nút chỉnh Volume nhạc nền độc lập
+
+    class LucacAudioContext extends _NativeCtx {
+        constructor(...args) {
+            super({ latencyHint:'interactive', sampleRate:48000 });
+            if (!_ctx) {
+                _ctx = this;
+                initAudioNodes();
+            }
+        }
+    }
+    try {
+        window.AudioContext = LucacAudioContext;
+        if (window.webkitAudioContext) window.webkitAudioContext = LucacAudioContext;
+    } catch(e) {}
+
+    function initAudioNodes() {
+        const blob = new Blob([WORKLET], { type:'application/javascript' });
+        _ctx.audioWorklet.addModule(URL.createObjectURL(blob))
+            .then(()=> UI.badge('READY','#ff69b4'))
+            .catch(()=> UI.badge('ERR','#ff4466'));
+
+        // Cài đặt Analyser cho hệ thống hiển thị Volume Live
+        _analyser = _ctx.createAnalyser();
+        _analyser.fftSize = 64;
+        
+        // Tạo bộ Volume chỉnh nhạc nền độc lập
+        _musicGainNode = _ctx.createGain();
+        _musicGainNode.gain.setValueAtTime(P.musicVol, _ctx.currentTime);
+    }
+
+    try {
+        if (!_ctx) {
+            _ctx = new _NativeCtx({ latencyHint:'interactive', sampleRate:48000 });
+            initAudioNodes();
+        }
+    } catch(e) {}
+
+    /* ═══════════════════════════════════════
+       GUM HOOK — BYPASS FILTERS
+    ═══════════════════════════════════════ */
+    const _nativeGUM = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async function(constraints) {
+        if (constraints && constraints.audio) {
+            const bypassFlags = {
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false, 
+                audioMirroring: false,
+                googEchoCancellation: false,
+                googAutoGainControl: false,
+                googNoiseSuppression: false,
+                googHighpassFilter: false,
+                googAudioShortTermEchoCancellation: false,
+                googAutoGainControl2: false
+            };
+
+            if (typeof constraints.audio === 'object') {
+                Object.assign(constraints.audio, bypassFlags);
+            } else {
+                constraints.audio = bypassFlags;
+            }
+        }
+
+        let raw;
+        try { raw = await _nativeGUM(constraints); }
+        catch(e) { UI.badge('MIC ERR','#ff4466'); throw e; }
+        try {
+            const proc = await Core.build(raw);
+            UI.badge('LIVE','#ff69b4');
+            return proc;
+        } catch(e) {
+            UI.badge('BYPASS','#ffbb00');
+            return raw;
+        }
+    };
+
+    /* ═══════════════════════════════════════
+       CORE ENGINE
+    ═══════════════════════════════════════ */
+    const Core = {
+        node: null,
+        async build(stream) {
+            if (!_ctx) {
+                try {
+                    _ctx = new _NativeCtx({ latencyHint:'interactive', sampleRate:48000 });
+                    initAudioNodes();
+                    await new Promise(r => setTimeout(r, 100));
+                } catch(e) { return stream; }
+            }
+            try {
+                if (_ctx.state === 'suspended') await _ctx.resume();
+                const src  = _ctx.createMediaStreamSource(stream);
+                const dest = _ctx.createMediaStreamDestination();
+                this.node  = new AudioWorkletNode(_ctx, 'lucac-engine', { numberOfOutputs:1, outputChannelCount:[2] });
+                this.push();
+                
+                // Kết nối Microphone qua Engine FX
+                src.connect(this.node);
+                
+                // Kết nối Đường nhạc nền chạy vào chung với Engine FX
+                _musicGainNode.connect(this.node);
+                
+                // Đầu ra cuối cùng kết nối lên Analyser để đo volume live trước khi xuất sang Discord
+                this.node.connect(_analyser);
+                _analyser.connect(dest);
+                
+                return dest.stream;
+            } catch(e) { return stream; }
+        },
+        push() {
+            if (!this.node || !_ctx) return;
+            const mp = this.node.parameters;
+            const t  = _ctx.currentTime;
+            mp.get('preGain').setTargetAtTime(P.preGain,   t, 0.015);
+            mp.get('drive').setTargetAtTime(P.drive,       t, 0.015);
+            mp.get('crush').setTargetAtTime(P.crush,       t, 0.015);
+            mp.get('width').setTargetAtTime(P.width,       t, 0.015);
+            mp.get('postGain').setTargetAtTime(P.postGain, t, 0.015);
+            mp.get('eqBass').setTargetAtTime(P.eqBass,     t, 0.015);
+            mp.get('eqMid').setTargetAtTime(P.eqMid,       t, 0.015);
+            mp.get('eqTreble').setTargetAtTime(P.eqTreble, t, 0.015);
+        },
+        // Xử lý nạp File nhạc và giải mã nhúng trực tiếp vào Mic line
+        playAudioFile(file) {
+            if (!_ctx) return;
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                try {
+                    const arrayBuffer = e.target.result;
+                    const audioBuffer = await _ctx.decodeAudioData(arrayBuffer);
+                    
+                    if (_musicSource) {
+                        try { _musicSource.stop(); } catch(err) {}
+                    }
+                    
+                    _musicSource = _ctx.createBufferSource();
+                    _musicSource.buffer = audioBuffer;
+                    _musicSource.loop = true; // Tự động lặp lại bài hát
+                    
+                    _musicSource.connect(_musicGainNode);
+                    _musicSource.start(0);
+                    document.getElementById('kh-music-info').innerText = "🎵 " + file.name.substring(0, 22) + "...";
+                    document.getElementById('kh-music-info').style.color = "#ff69b4";
+                } catch(err) {
+                    alert("Lỗi định dạng âm thanh không giải mã được!");
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        },
+        stopAudioFile() {
+            if (_musicSource) {
+                try { _musicSource.stop(); } catch(e) {}
+                _musicSource = null;
+                document.getElementById('kh-music-info').innerText = "Chưa chọn file nhạc...";
+                document.getElementById('kh-music-info').style.color = "#778899";
+            }
+        }
+    };
+
+    /* ═══════════════════════════════════════
+       PRESETS
+    ═══════════════════════════════════════ */
+    const PRESETS = {
+        'CLEAN':    { preGain:4,    drive:0,    crush:0,    width:0,   postGain:1,   eqBass:0,  eqMid:0,  eqTreble:0 },
+        'EBOY':     { preGain:10,   drive:0.02, crush:0,    width:0.65,postGain:1.4, eqBass:5,  eqMid:-2, eqTreble:1 }, 
+        'LOUD':     { preGain:50,   drive:0.55, crush:0.35, width:0,   postGain:3,   eqBass:2,  eqMid:4,  eqTreble:-1 },
+        'SIÊU ỒN':  { preGain:150,  drive:0.75, crush:0.7,  width:0,   postGain:6,   eqBass:6,  eqMid:6,  eqTreble:-3 },
+        'ĐÈ HOOK':  { preGain:1500, drive:1.0,  crush:0.95, width:0,   postGain:40,  eqBass:8,  eqMid:0,  eqTreble:5 }, 
+        'NUKE':     { preGain:3000, drive:1.0,  crush:1.0,  width:0,   postGain:80,  eqBass:12, eqMid:12, eqTreble:12 }, 
+    };
+
+    function applyPreset(key) {
+        const pr = PRESETS[key];
+        Object.assign(P, pr);
+        Core.push();
+        syncUI();
+        document.querySelectorAll('.kp-btn').forEach(b =>
+            b.classList.toggle('kp-on', b.dataset.k === key)
+        );
+    }
+
+    function syncUI() {
+        setSlider('sl-pg',  P.preGain,  3000); 
+        setSlider('sl-dr',  P.drive,    1);
+        setSlider('sl-cr',  P.crush,    1);
+        setSlider('sl-wd',  P.width,    2);
+        setSlider('sl-po',  P.postGain, 80);  
+        
+        setSliderEq('sl-eqb', P.eqBass);
+        setSliderEq('sl-eqm', P.eqMid);
+        setSliderEq('sl-eqt', P.eqTreble);
+
+        setLabel('lb-pg',  P.preGain.toFixed(1) + 'x');
+        setLabel('lb-dr',  (P.drive   * 100).toFixed(0) + '%');
+        setLabel('lb-cr',  (P.crush   * 100).toFixed(0) + '%');
+        setLabel('lb-wd',  (P.width   * 100).toFixed(0) + '%');
+        setLabel('lb-po',  P.postGain.toFixed(1) + 'x');
+
+        setLabel('lb-eqb', (P.eqBass > 0 ? '+' : '') + P.eqBass.toFixed(1) + ' dB');
+        setLabel('lb-eqm', (P.eqMid > 0 ? '+' : '') + P.eqMid.toFixed(1) + ' dB');
+        setLabel('lb-eqt', (P.eqTreble > 0 ? '+' : '') + P.eqTreble.toFixed(1) + ' dB');
+    }
+
+    function setSlider(id, val, max) {
+        const el = document.getElementById(id); if (!el) return;
+        el.value = val;
+        el.style.setProperty('--v', ((val/max)*100).toFixed(1)+'%');
+    }
+    function setSliderEq(id, val) {
+        const el = document.getElementById(id); if (!el) return;
+        el.value = val;
+        const pct = ((val + 12) / 24) * 100;
+        el.style.setProperty('--v', pct.toFixed(1)+'%');
+    }
+    function setLabel(id, txt) {
+        const el = document.getElementById(id); if (el) el.innerText = txt;
+    }
+
+    /* ═══════════════════════════════════════
+       GIAO DIỆN HIỂN THỊ (UI)
+    ═══════════════════════════════════════ */
+    const UI = {
+        el: null, collapsed: false,
+        dragging: false, ox:0, oy:0,
+        canvas: null, ctx: null, meteors: [],
+
+        badge(t,c) {
+            const e = document.getElementById('kh-st');
+            const d = document.getElementById('kh-dot');
+            if (e) { e.innerText=t; e.style.color=c; }
+            if (d) { d.style.background=c; d.style.boxShadow=`0 0 7px ${c}`; }
+        },
+
+        init() {
+            const el = document.createElement('div');
+            el.id = 'kh-root';
+            el.innerHTML = `
+<canvas id="kh-canvas-meteor"></canvas>
+<div id="kh-head">
+    <div id="kh-title">
+        <span id="kh-fire">🌠</span>
+        <span id="kh-name">Paw Hook Vip 36</span>
+        <span id="kh-tag">v6</span>
+    </div>
+    <div id="kh-right">
+        <div id="kh-badge"><span id="kh-dot"></span><span id="kh-st">WAIT</span></div>
+        <button id="kh-col">▼</button>
+    </div>
+</div>
+<div id="kh-vu-container"><div id="kh-vu-bar"></div></div>
+
+<div id="kh-body">
+    <div id="kh-presets">
+        ${Object.keys(PRESETS).map(k=>{
+            let cls = '';
+            if (k === 'EBOY') cls = ' kp-eboy';
+            else if (k === 'ĐÈ HOOK') cls = ' kp-apo';
+            else if (k === 'NUKE') cls = ' kp-nuke';
+            return `<button class="kp-btn${cls}" data-k="${k}">${k}</button>`;
+        }).join('')}
+    </div>
+    <div class="kh-sep"></div>
+    
+    ${[
+        ['sl-pg','lb-pg','PRE GAIN','🔊',1,3000,4],
+        ['sl-dr','lb-dr','DRIVE','🔥',0,1,0],
+        ['sl-cr','lb-cr','CRUSH','💥',0,1,0],
+        ['sl-wd','lb-wd','WIDTH','🌐',0,2,0],
+        ['sl-po','lb-po','POSTGAIN','⚡',0.1,80,1],
+    ].map(([sid,lid,name,ico,mn,mx,def])=>`
+    <div class="kh-row">
+        <div class="kh-rowlabel"><span>${ico} ${name}</span><span id="${lid}">${def}${sid==='sl-pg'||sid==='sl-po'?'x':'%'}</span></div>
+        <input type="range" id="${sid}" min="${mn}" max="${mx}" step="${mx<=1?0.01:1}" value="${def}" style="--v:${((def-mn)/(mx-mn)*100).toFixed(0)}%">
+    </div>`).join('')}
+    
+    <div class="kh-sep"></div>
+    
+    <div class="kh-section-title sec-eq">🎛️ EQUALIZER (3-BAND)</div>
+    ${[
+        ['sl-eqb','lb-eqb','BASS (LOW)','🎸',-12,12,0],
+        ['sl-eqm','lb-eqm','MID (VOCAL)','🎤',-12,12,0],
+        ['sl-eqt','lb-eqt','TREBLE (HIGH)','✨',-12,12,0],
+    ].map(([sid,lid,name,ico,mn,mx,def])=>`
+    <div class="kh-row">
+        <div class="kh-rowlabel"><span>${ico} ${name}</span><span id="${lid}">0.0 dB</span></div>
+        <input type="range" class="eq-slider" id="${sid}" min="${mn}" max="${mx}" step="0.5" value="${def}" style="--v:50%">
+    </div>`).join('')}
+
+    <div class="kh-sep"></div>
+
+    <div class="kh-section-title sec-music">🎵 AUDIO PLAYER (INPUT MUSIC TO MIC)</div>
+    <div id="kh-music-box">
+        <div id="kh-music-info">Chưa chọn file nhạc...</div>
+        <div style="display:flex; gap:6px; margin-top:6px;">
+            <button id="btn-select-file" class="music-btn">📁 Chọn File</button>
+            <button id="btn-stop-file" class="music-btn stop-btn">⏹ Dừng</button>
+            <input type="file" id="audio-file-input" accept="audio/*" style="display:none;">
+        </div>
+        <div class="kh-row" style="margin-top:8px;">
+            <div class="kh-rowlabel"><span>🔊 Âm lượng nhạc</span><span id="lb-music-vol">50%</span></div>
+            <input type="range" class="music-slider" id="sl-music-vol" min="0" max="1" step="0.01" value="0.5" style="--v:50%">
+        </div>
+    </div>
+
+    <div class="kh-sep"></div>
+    <button id="kh-rst">↺ RESET ENGINE</button>
+</div>`;
+            document.body.appendChild(el);
+            this.el = el;
+            this.css();
+            this.events();
+            this.badge('WAIT','#888');
+            this.initMeteor();
+            this.initVUMeter();
+        },
+
+        initMeteor() {
+            this.canvas = document.getElementById('kh-canvas-meteor');
+            if (!this.canvas) return;
+            this.ctx = this.canvas.getContext('2d');
+            const resize = () => {
+                const r = this.el.getBoundingClientRect();
+                this.canvas.width = r.width; this.canvas.height = r.height;
+            };
+            resize();
+            const observer = new MutationObserver(resize);
+            observer.observe(document.getElementById('kh-body'), { attributes: true, style: true });
+
+            this.meteors = [];
+            const draw = () => {
+                if (!this.ctx || this.collapsed) { requestAnimationFrame(draw); return; }
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+                if (this.meteors.length < 5 && Math.random() < 0.04) {
+                    this.meteors.push({
+                        x: Math.random() * this.canvas.width * 1.3, y: -20,
+                        length: Math.random() * 60 + 40, speed: Math.random() * 4 + 3,
+                        opacity: Math.random() * 0.6 + 0.4, width: Math.random() * 1 + 0.8
+                    });
+                }
+                for (let i = this.meteors.length - 1; i >= 0; i--) {
+                    let m = this.meteors[i]; m.x -= m.speed; m.y += m.speed * 0.8;
+                    let grad = this.ctx.createLinearGradient(m.x, m.y, m.x + m.length, m.y - m.length * 0.8);
+                    grad.addColorStop(0, `rgba(255, 105, 180, ${m.opacity})`);
+                    grad.addColorStop(0.2, `rgba(255, 20, 147, ${m.opacity * 0.6})`);
+                    grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+                    this.ctx.beginPath(); this.ctx.strokeStyle = grad; this.ctx.lineWidth = m.width;
+                    this.ctx.moveTo(m.x, m.y); this.ctx.lineTo(m.x + m.length, m.y - m.length * 0.8); this.ctx.stroke();
+                    if (m.x < -m.length || m.y > this.canvas.height + m.length) this.meteors.splice(i, 1);
+                }
+                requestAnimationFrame(draw);
+            };
+            draw();
+        },
+
+        // Xử lý đồ họa cho cột quét Volume Live-time
+        initVUMeter() {
+            const vuBar = document.getElementById('kh-vu-bar');
+            const dataArray = new Uint8Array(_analyser ? _analyser.frequencyBinCount : 0);
+            
+            const updateVU = () => {
+                if (_analyser && !this.collapsed) {
+                    _analyser.getByteFrequencyData(dataArray);
+                    let sum = 0;
+                    for (let i = 0; i < dataArray.length; i++) {
+                        sum += dataArray[i];
+                    }
+                    let rms = sum / dataArray.length;
+                    let percentage = Math.min(100, (rms / 140) * 100); // Scale mượt
+                    if(vuBar) vuBar.style.width = percentage + '%';
+                }
+                requestAnimationFrame(updateVU);
+            };
+            updateVU();
+        },
+
+        events() {
+            document.getElementById('kh-col').onclick = () => {
+                this.collapsed = !this.collapsed;
+                document.getElementById('kh-body').style.display = this.collapsed ? 'none' : 'block';
+                document.getElementById('kh-vu-container').style.display = this.collapsed ? 'none' : 'block';
+                document.getElementById('kh-col').innerText = this.collapsed ? '▲' : '▼';
+            };
+
+            const rows = [
+                ['sl-pg','lb-pg','preGain', 3000,'x'],
+                ['sl-dr','lb-dr','drive',   1,  '%', 100],
+                ['sl-cr','lb-cr','crush',   1,  '%', 100],
+                ['sl-wd','lb-wd','width',   2,  '%', 100],
+                ['sl-po','lb-po','postGain',80, 'x'],
+            ];
+            rows.forEach(([sid,lid,param,max,unit,scale=1]) => {
+                const sl = document.getElementById(sid);
+                sl.oninput = () => {
+                    const v = parseFloat(sl.value);
+                    P[param] = v;
+                    setLabel(lid, (v*scale).toFixed(scale===100?0:1)+unit);
+                    sl.style.setProperty('--v', ((v-parseFloat(sl.min))/(max-parseFloat(sl.min))*100).toFixed(1)+'%');
+                    Core.push();
+                };
+            });
+
+            const eqRows = [
+                ['sl-eqb', 'lb-eqb', 'eqBass'],
+                ['sl-eqm', 'lb-eqm', 'eqMid'],
+                ['sl-eqt', 'lb-eqt', 'eqTreble']
+            ];
+            eqRows.forEach(([sid, lid, param]) => {
+                const sl = document.getElementById(sid);
+                sl.oninput = () => {
+                    const v = parseFloat(sl.value);
+                    P[param] = v;
+                    setLabel(lid, (v > 0 ? '+' : '') + v.toFixed(1) + ' dB');
+                    const pct = ((v + 12) / 24) * 100;
+                    sl.style.setProperty('--v', pct.toFixed(1) + '%');
+                    Core.push();
+                };
+            });
+
+            // Xử lý sự kiện Audio Player
+            const fileInput = document.getElementById('audio-file-input');
+            document.getElementById('btn-select-file').onclick = () => fileInput.click();
+            fileInput.onchange = (e) => {
+                if (e.target.files[0]) Core.playAudioFile(e.target.files[0]);
+            };
+            document.getElementById('btn-stop-file').onclick = () => Core.stopAudioFile();
+
+            // Chỉnh âm lượng nhạc nền
+            const slMusic = document.getElementById('sl-music-vol');
+            slMusic.oninput = () => {
+                const v = parseFloat(slMusic.value);
+                P.musicVol = v;
+                setLabel('lb-music-vol', (v * 100).toFixed(0) + '%');
+                slMusic.style.setProperty('--v', (v * 100).toFixed(1) + '%');
+                if (_musicGainNode) _musicGainNode.gain.setValueAtTime(v, _ctx.currentTime);
+            };
+
+            document.querySelectorAll('.kp-btn').forEach(b =>
+                b.onclick = () => applyPreset(b.dataset.k)
+            );
+
+            document.getElementById('kh-rst').onclick = () => {
+                applyPreset('CLEAN');
+                Core.stopAudioFile();
+                document.querySelectorAll('.kp-btn').forEach(b => b.classList.remove('kp-on'));
+            };
+
+            const head = document.getElementById('kh-head');
+            head.addEventListener('touchstart', e => {
+                const t=e.touches[0], r=this.el.getBoundingClientRect();
+                this.dragging=true; this.ox=t.clientX-r.left; this.oy=t.clientY-r.top;
+            }, {passive:true});
+            document.addEventListener('touchmove', e => {
+                if (!this.dragging) return;
+                const t=e.touches[0];
+                this.el.style.left=(t.clientX-this.ox)+'px'; this.el.style.top=(t.clientY-this.oy)+'px';
+                this.el.style.right='auto';
+            }, {passive:true});
+            document.addEventListener('touchend', ()=>{ this.dragging=false; });
+            head.addEventListener('mousedown', e => {
+                const r=this.el.getBoundingClientRect();
+                this.dragging=true; this.ox=e.clientX-r.left; this.oy=e.clientY-r.top;
+                e.preventDefault();
+            });
+            document.addEventListener('mousemove', e => {
+                if (!this.dragging) return;
+                this.el.style.left=(e.clientX-this.ox)+'px'; this.el.style.top=(e.clientY-this.oy)+'px';
+                this.el.style.right='auto';
+            });
+            document.addEventListener('mouseup', ()=>{ this.dragging=false; });
+        },
+
+        css() {
+            const s = document.createElement('style');
+            s.textContent = `
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@600;700&family=Share+Tech+Mono&display=swap');
+#kh-root {
+    position:fixed; top:55px; right:14px; width:270px;
+    background:linear-gradient(160deg, #1a000a 60%, #3f001f);
+    border:1.5px solid #ff69b4; border-radius:12px; z-index:2147483647;
+    box-shadow:0 0 35px rgba(255, 105, 180, 0.25), 0 0 0 1px rgba(255, 20, 147, 0.1), 0 6px 30px #000a;
+    font-family:'Rajdhani',sans-serif; color:#fff;
+    backdrop-filter:blur(12px); user-select:none; touch-action:none; overflow:hidden;
+}
+#kh-canvas-meteor { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; }
+#kh-head, #kh-body, #kh-vu-container { position: relative; z-index: 1; }
+#kh-head {
+    display:flex; justify-content:space-between; align-items:center; padding:10px 14px 9px; cursor:grab;
+    background:linear-gradient(90deg, rgba(255, 105, 180, 0.12), rgba(255, 20, 147, 0.05));
+    border-bottom:1px solid rgba(255, 105, 180, 0.15);
+}
+#kh-head:active{cursor:grabbing;}
+#kh-title { display:flex; align-items:center; gap:6px; }
+#kh-fire { font-size:16px; filter:drop-shadow(0 0 6px #ff69b4); }
+#kh-name { font-size:15px; font-weight:700; letter-spacing:1.5px; color:#ff69b4; text-shadow:0 0 12px rgba(255, 105, 180, 0.8); }
+#kh-tag { font-size:9px; background:#ff69b4; color:#000; padding:1px 5px; border-radius:4px; font-weight:700; }
+#kh-right { display:flex; align-items:center; gap:8px; }
+#kh-badge { display:flex; align-items:center; gap:5px; background:#001122; padding:2px 8px; border-radius:20px; }
+#kh-dot { width:7px; height:7px; border-radius:50%; background:#888; transition:all .3s; }
+#kh-st  { font-size:9px; color:#888; font-family:'Share Tech Mono',monospace; letter-spacing:1px; }
+#kh-col { background:none; border:1px solid #ff69b4; color:#ff69b4; border-radius:5px; width:22px; height:22px; font-size:11px; cursor:pointer; padding:0; transition:all .15s; }
+#kh-col:hover { background:rgba(255, 105, 180, 0.15); }
+
+/* VU Meter CSS Style */
+#kh-vu-container { height: 4px; background: rgba(80, 0, 40, 0.5); width: 100%; overflow: hidden; }
+#kh-vu-bar { height: 100%; width: 0%; background: linear-gradient(90deg, #ff69b4, #ff1493); transition: width 0.05s ease-out; box-shadow: 0 0 8px #ff69b4; }
+
+#kh-body { padding:12px 14px; max-height: 75vh; overflow-y: auto; }
+#kh-body::-webkit-scrollbar { width: 4px; }
+#kh-body::-webkit-scrollbar-thumb { background: rgba(255, 105, 180, 0.3); border-radius: 4px; }
+
+#kh-presets { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:10px; }
+.kp-btn { flex:1 1 auto; padding:5px 6px; font-family:'Rajdhani',sans-serif; font-size:10px; font-weight:700; background:rgba(40, 0, 20, 0.6); border:1px solid rgba(255, 105, 180, 0.3); color:#ff99cc; border-radius:6px; cursor:pointer; letter-spacing:.5px; transition:all .15s; white-space:nowrap; }
+.kp-btn:hover { background:rgba(255, 105, 180, 0.2); border-color:#ff69b4; color:#fff; }
+.kp-btn.kp-on { background:#ff69b4; color:#000; border-color:#ffb6c1; box-shadow:0 0 12px rgba(255, 105, 180, 0.6); }
+.kp-eboy { border-color:rgba(255, 105, 180, 0.4) !important; color:#ff69b4 !important; }
+.kp-eboy.kp-on { background:#ff69b4 !important; box-shadow:0 0 14px rgba(255, 105, 180, 0.6) !important; color:#000 !important; }
+.kp-apo { border-color:rgba(255, 20, 147, 0.5) !important; color:#ff1493 !important; }
+.kp-apo.kp-on { background:#ff1493 !important; box-shadow:0 0 14px rgba(255, 20, 147, 0.6) !important; color:#fff !important; }
+.kp-nuke { border-color:rgba(255, 0, 255, 0.5) !important; color:#ff00ff !important; }
+.kp-nuke.kp-on { background:#ff00ff !important; box-shadow:0 0 18px rgba(255, 0, 255, 0.6) !important; color:#fff !important; }
+
+.kh-sep { height:1px; background:linear-gradient(90deg,transparent,rgba(255, 105, 180, 0.2),transparent); margin:8px 0; }
+.kh-section-title { font-size: 11px; font-weight: 700; margin: 6px 0 10px 0; letter-spacing: 1px; }
+.sec-eq { color: #ff69b4; text-shadow: 0 0 8px rgba(255, 105, 180, 0.4); }
+.sec-music { color: #ff69b4; text-shadow: 0 0 8px rgba(255, 105, 180, 0.4); }
+
+/* Audio Player CSS design */
+#kh-music-box { background: rgba(20, 0, 10, 0.6); border: 1px solid rgba(255, 105, 180, 0.2); border-radius: 8px; padding: 10px; }
+#kh-music-info { font-family: 'Share Tech Mono', monospace; font-size: 11px; color: #778899; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.music-btn { flex: 1; background: #220011; border: 1px solid #ff69b4; color: #ff99cc; padding: 5px 10px; font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700; border-radius: 5px; cursor: pointer; transition: all 0.15s; }
+.music-btn:hover { background: rgba(255, 105, 180, 0.2); color: #fff; }
+.stop-btn { border-color: #ff3344; color: #ff6677; background: #220505; }
+.stop-btn:hover { background: rgba(255, 51, 68, 0.2); }
+
+.kh-row { margin-bottom:10px; }
+.kh-rowlabel { display:flex; justify-content:space-between; font-size:11px; font-weight:700; color:#cc8899; margin-bottom:5px; letter-spacing:.5px; }
+.kh-rowlabel span:last-child { color:#ff69b4; font-family:'Share Tech Mono',monospace; font-size:11px; }
+
+input[type=range] { -webkit-appearance:none; width:100%; height:5px; background:linear-gradient(90deg, #ff69b4 var(--v,0%), #220011 var(--v,0%)); border-radius:3px; outline:none; }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:15px; height:15px; background:radial-gradient(circle, #ffb6c1, #ff1493); border-radius:50%; cursor:pointer; border:1.5px solid #fff; box-shadow:0 0 8px rgba(255, 105, 180, 0.6); }
+
+input[type=range].eq-slider { background:linear-gradient(90deg, #ff69b4 var(--v,0%), #220011 var(--v,0%)); }
+input[type=range].eq-slider::-webkit-slider-thumb { background:radial-gradient(circle, #ffb6c1, #ff1493); box-shadow:0 0 8px rgba(255, 105, 180, 0.6); }
+
+input[type=range].music-slider { background:linear-gradient(90deg, #ff69b4 var(--v,0%), #220011 var(--v,0%)); }
+input[type=range].music-slider::-webkit-slider-thumb { background:radial-gradient(circle, #ffb6c1, #ff1493); box-shadow:0 0 8px rgba(255, 105, 180, 0.6); }
+
+#kh-rst { width:100%; padding:8px; margin-top:2px; background:transparent; border:1px solid rgba(255, 105, 180, 0.3); color:#ff69b4; font-family:'Rajdhani',sans-serif; font-size:13px; font-weight:700; border-radius:7px; cursor:pointer; letter-spacing:1px; transition:all .15s; }
+#kh-rst:hover { background:rgba(255, 105, 180, 0.1); border-color:#ff69b4; }
+`;
+            document.head.appendChild(s);
+        }
+    };
+
+    if (document.readyState === 'loading')
+        document.addEventListener('DOMContentLoaded', () => UI.init());
+    else UI.init();
+})();
