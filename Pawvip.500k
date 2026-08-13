@@ -1,0 +1,371 @@
+// ==UserScript==
+// @name         Paw Vip 500k
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Audio enhancer for Discord Web
+// @author       Paw
+// @match        https://discord.com/*
+// @match        https://*.discord.com/*
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    if (window.PawYexFinal) return;
+    window.PawYexFinal = true;
+
+    // --- CONFIG ---
+    const PARAMS = {
+        gain: 1.0,
+        energy: 1.0,
+        bitrate: 510000,
+        
+        // Toggles
+        allowMuting: true,
+        useOldGain: false,   // Bypass
+        useHardClip: false,
+        useStereo: true,
+        useBass: true,
+        
+        // Extra
+        dbChecker: false,
+        turnOffDec: false
+    };
+
+    // --- SYSTEM HIJACKER (Anti-3002) ---
+    const NativeAudioContext = window.AudioContext || window.webkitAudioContext;
+    window.AudioContext = function(...args) {
+        const ctx = new NativeAudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
+        window.DiscordContext = ctx;
+        const osc = ctx.createOscillator();
+        const g = ctx.createGain(); g.gain.value = 0.0001;
+        osc.connect(g).connect(ctx.destination);
+        osc.start();
+        return ctx;
+    };
+    window.AudioContext.prototype = NativeAudioContext.prototype;
+
+    // --- AUDIO ENGINE ---
+    const Core = {
+        nodes: {},
+        build(stream) {
+            const ctx = window.DiscordContext || new NativeAudioContext();
+            const source = ctx.createMediaStreamSource(stream);
+            const dest = ctx.createMediaStreamDestination();
+
+            const n_pre = ctx.createGain();
+            const n_bass = ctx.createBiquadFilter(); 
+            n_bass.type = 'lowshelf'; n_bass.frequency.value = 150;
+            
+            const n_energy = ctx.createBiquadFilter();
+            n_energy.type = 'highshelf'; n_energy.frequency.value = 4000;
+
+            const n_gain = ctx.createGain();
+            const n_clip = ctx.createWaveShaper(); n_clip.oversample = 'none';
+            
+            const n_split = ctx.createChannelSplitter(2);
+            const n_merge = ctx.createChannelMerger(2);
+            const n_delay = ctx.createDelay();
+            
+            const n_out = ctx.createGain();
+
+            // Wiring
+            source.connect(n_pre);
+            n_pre.connect(n_bass);
+            n_bass.connect(n_energy);
+            n_energy.connect(n_gain);
+            n_gain.connect(n_clip);
+            
+            // Stereo Logic
+            n_clip.connect(n_split);
+            n_split.connect(n_merge, 0, 0);
+            n_split.connect(n_delay, 0);
+            n_delay.connect(n_merge, 0, 1);
+            
+            n_merge.connect(n_out);
+            n_out.connect(dest);
+
+            window.PawNodes = { source, n_pre, n_bass, n_energy, n_gain, n_clip, n_delay, n_out };
+            this.update();
+            return dest.stream;
+        },
+
+        update() {
+            if (!window.PawNodes.n_gain) return;
+            const t = window.DiscordContext.currentTime;
+            const p = PARAMS;
+
+            if (p.useOldGain) {
+                window.PawNodes.n_gain.gain.setTargetAtTime(1, t, 0.1);
+                return;
+            }
+
+            // 1. Gain
+            const db = p.gain; 
+            const val = db > 10 ? Math.pow(10, db/20) : db;
+            window.PawNodes.n_gain.gain.setTargetAtTime(val, t, 0.1);
+
+            // 2. Energy
+            window.PawNodes.n_energy.gain.value = (p.energy - 1.0) * 10;
+
+            // 3. Bass
+            window.PawNodes.n_bass.gain.value = p.useBass ? 10 : 0;
+
+            // 4. Stereo
+            window.PawNodes.n_delay.delayTime.value = p.useStereo ? 0.01 : 0;
+
+            // 5. Hard Clip
+            window.PawNodes.n_clip.curve = p.useHardClip ? this.makeCurve() : null;
+
+            // 6. Mute
+            window.PawNodes.n_out.gain.value = p.allowMuting ? 0 : 1;
+        },
+
+        makeCurve() {
+            const n=256, c=new Float32Array(n);
+            for(let i=0;i<n;i++){let x=i*2/n-1; c[i]=x>0?1:(x<0?-1:0);}
+            return c;
+        }
+    };
+
+    const nativeGUM = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async (c) => {
+        if(c.audio) c.audio = {echoCancellation:false, noiseSuppression:false, autoGainControl:false};
+        try { return Core.build(await nativeGUM(c)); } catch(e) { return nativeGUM(c); }
+    };
+
+    /* ==========================================================================
+       UI ENGINE (EXACT REPLICA)
+       ========================================================================== */
+    const UI = {
+        init() {
+            const el = document.createElement('div');
+            el.id = 'yex-root';
+            el.innerHTML = `
+                <div class="yx-head">
+                    <div class="yx-title">
+                        <div class="yx-bar"></div>
+                        <span>Paw Vip 500k</span>
+                        <div class="yx-line"></div>
+                    </div>
+                    <button class="yx-close">×</button>
+                </div>
+
+                <div class="yx-scroll">
+                    <!-- MAIN SLIDERS -->
+                    ${this.row('gain', '1.000', 1, 100, 1, 'gain')}
+                    ${this.row('energy', '1.000', 1, 10, 1, 'energy')}
+                    
+                    <!-- BITRATE -->
+                    <div class="yx-row">
+                        <div class="yx-box"></div>
+                        <div class="yx-val-long">510000.000</div>
+                        <input type="range" id="bitrate" min="8000" max="510000" value="510000" class="yx-sl-long">
+                        <div class="yx-lbl">bitrate</div>
+                    </div>
+
+                    <!-- TOGGLES 1 -->
+                    ${this.chk('allowMuting', 'allow muting', true)}
+                    ${this.chk('useOldGain', 'use old gain')}
+                    ${this.chk('useHardClip', 'use hardclip slider')}
+
+                    <!-- SECTION: DISCORD SETTINGS -->
+                    <div class="yx-sec">
+                        <div class="yx-sec-bar"></div>
+                        <span>discord settings</span>
+                        <div class="yx-sec-line"></div>
+                    </div>
+                    ${this.chk('useStereo', 'use stereo', true)}
+                    ${this.chk('useBass', 'use bass', true)}
+
+                    <!-- SECTION: DECODER -->
+                    <div class="yx-sec">
+                        <div class="yx-sec-bar"></div>
+                        <span>decoder</span>
+                        <div class="yx-sec-line"></div>
+                    </div>
+                    ${this.chk('dbChecker', 'db checker')}
+                    ${this.chk('turnOffDec', 'turn off decoder')}
+
+                    <!-- DECODER TEXT BOX -->
+                    <div class="yx-dec-box">decoder text</div>
+
+                    <!-- SECTION: UI/SPOOFING -->
+                    <div class="yx-sec">
+                        <div class="yx-sec-bar"></div>
+                        <span>ui / spoofing</span>
+                        <div class="yx-sec-line"></div>
+                    </div>
+                    ${this.chk('streamproof', 'streamproof')}
+                    ${this.chk('topmost', 'top most')}
+                    ${this.chk('pageui', 'page ui')}
+
+                    <!-- BUTTONS -->
+                    <div class="yx-btns">
+                        <button>clear journal</button>
+                        <button>clear run history</button>
+                        <button>clear traces</button>
+                        <button>change date (check clipboard)</button>
+                    </div>
+
+                    <!-- DEBUG -->
+                    <div class="yx-sec">
+                        <div class="yx-sec-bar"></div>
+                        <span>debugging</span>
+                        <div class="yx-sec-line"></div>
+                    </div>
+                    ${this.chk('console', 'toggle console')}
+                    <div class="yx-btns"><button>clear console</button></div>
+                    <div class="yx-proc">process: Discord.exe</div>
+
+                    <!-- CONFIG -->
+                    <div class="yx-sec">
+                        <div class="yx-sec-bar"></div>
+                        <span>configuration</span>
+                        <div class="yx-sec-line"></div>
+                    </div>
+                    <div class="yx-cfg-row">
+                        <input type="text" class="yx-inp" readonly>
+                        <span>config name</span>
+                    </div>
+                    <div class="yx-btns">
+                        <button>save config</button>
+                        <button>load config</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(el);
+            this.style();
+            this.logic();
+            this.drag(el);
+        },
+
+        row(id, val, min, max, curr, lbl) {
+            return `
+                <div class="yx-row">
+                    <div class="yx-box"></div>
+                    <div class="yx-val" id="v-${id}">${val}</div>
+                    <input type="range" id="${id}" min="${min}" max="${max}" step="0.1" value="${curr}">
+                    <div class="yx-lbl">${lbl}</div>
+                </div>
+            `;
+        },
+
+        chk(id, lbl, c) {
+            return `
+                <div class="yx-chk-row">
+                    <input type="checkbox" id="${id}" ${c?'checked':''}>
+                    <label for="${id}">${lbl}</label>
+                </div>
+            `;
+        },
+
+        logic() {
+            // Sliders
+            ['gain', 'energy'].forEach(k => {
+                document.getElementById(k).oninput = e => {
+                    const v = parseFloat(e.target.value);
+                    PARAMS[k] = v;
+                    document.getElementById('v-'+k).innerText = v.toFixed(3);
+                    Core.update();
+                }
+            });
+            
+            // Checkboxes
+            document.querySelectorAll('input[type=checkbox]').forEach(c => {
+                c.onchange = e => {
+                    PARAMS[c.id] = e.target.checked;
+                    Core.update();
+                }
+            });
+
+            // Close
+            const root = document.getElementById('yex-root');
+            let m = false;
+            root.querySelector('.yx-close').onclick = () => {
+                m=!m;
+                root.querySelector('.yx-scroll').style.display = m?'none':'block';
+                root.style.height = m?'auto':'600px';
+            };
+        },
+
+        style() {
+            const s = document.createElement('style');
+            s.textContent = `
+                @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap');
+                
+                #yex-root {
+                    position: fixed; top: 20px; left: 20px; width: 340px; height: 600px;
+                    background: #0e1012; border: 1px solid #2b2d31;
+                    font-family: 'Roboto Mono', monospace; color: #fff;
+                    z-index: 9999999; box-shadow: 0 10px 30px #000;
+                    font-size: 11px; display: flex; flex-direction: column;
+                }
+                
+                /* HEADER */
+                .yx-head {
+                    padding: 5px 10px; background: #0e1012; display: flex; justify-content: space-between; align-items: center; cursor: move;
+                }
+                .yx-title { display: flex; align-items: center; width: 100%; color: #ccc; }
+                .yx-bar { width: 8px; height: 2px; background: #444; margin-right: 5px; }
+                .yx-line { flex: 1; height: 1px; background: #2b2d31; margin-left: 10px; margin-right: 10px; }
+                .yx-close { background: #d94343; border: none; color: white; width: 16px; height: 16px; font-size: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+
+                .yx-scroll { padding: 10px; overflow-y: auto; flex: 1; }
+
+                /* ROW STYLES */
+                .yx-row { display: flex; align-items: center; margin-bottom: 4px; }
+                .yx-box { width: 12px; height: 12px; background: #2b7de9; margin-right: 5px; }
+                .yx-val { width: 60px; background: #15181c; text-align: center; margin-right: 5px; color: #ccc; padding: 2px 0; }
+                .yx-val-long { width: 100px; background: #15181c; text-align: center; margin-right: 5px; color: #ccc; padding: 2px 0; }
+                
+                input[type=range] { flex: 1; -webkit-appearance: none; height: 16px; background: #15181c; margin-right: 5px; border: 1px solid #222; }
+                input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 0; height: 0; }
+                /* Fake Progress bar hack for Webkit */
+                input[type=range]::-webkit-slider-runnable-track { background: linear-gradient(to right, #2b7de9 0%, #2b7de9 var(--value, 0%), #15181c var(--value, 0%), #15181c 100%); }
+
+                .yx-lbl { width: 60px; text-align: right; color: #ccc; }
+
+                /* CHECKBOXES */
+                .yx-chk-row { display: flex; align-items: center; margin-bottom: 2px; }
+                .yx-chk-row input { accent-color: #2b7de9; margin-right: 8px; }
+                .yx-chk-row label { color: #ccc; }
+
+                /* SECTIONS */
+                .yx-sec { display: flex; align-items: center; margin-top: 10px; margin-bottom: 5px; color: #888; }
+                .yx-sec-bar { width: 8px; height: 2px; background: #444; margin-right: 5px; }
+                .yx-sec-line { flex: 1; height: 1px; background: #2b2d31; margin-left: 10px; }
+
+                /* DECODER TEXT */
+                .yx-dec-box { background: #151a21; color: #555; padding: 4px; text-align: right; margin-bottom: 5px; border-bottom: 2px solid #1e2329; }
+
+                /* BUTTONS */
+                .yx-btns { display: flex; flex-direction: column; gap: 3px; margin-bottom: 5px; }
+                .yx-btns button { 
+                    background: #18283d; border: 1px solid #203550; color: #8fbdf5; 
+                    text-align: left; padding: 4px 8px; font-family: inherit; font-size: 10px; cursor: pointer;
+                }
+                .yx-btns button:hover { background: #203550; }
+
+                .yx-proc { font-size: 10px; color: #ccc; margin: 5px 0; }
+
+                .yx-cfg-row { display: flex; align-items: center; margin-bottom: 5px; }
+                .yx-inp { flex: 1; background: #151a21; border: 1px solid #222; color: #fff; margin-right: 5px; padding: 2px; }
+            `;
+            document.head.appendChild(s);
+            
+            // Slider fill hack
+            document.querySelectorAll('input[type=range]').forEach(i => {
+                i.addEventListener('input', () => i.style.setProperty('--value', (i.value-i.min)/(i.max-i.min)*100 + '%'));
+                i.style.setProperty('--value', (i.value-i.min)/(i.max-i.min)*100 + '%');
+            });
+        },
+
+        drag(el) { const h=el.querySelector('.yx-head'); let d=false,x,y; h.onmousedown=e=>{d=true;x=el.offsetLeft-e.clientX;y=el.offsetTop-e.clientY;}; document.onmouseup=()=>d=false; document.onmousemove=e=>{if(d){el.style.left=(e.clientX+x)+'px';el.style.top=(e.clientY+y)+'px';}}; }
+    };
+
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => UI.init());
+    else UI.init();
+})();
